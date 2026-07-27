@@ -48,6 +48,13 @@ class AmountPickerView @JvmOverloads constructor(
         const val LONG_PRESS_MS = 250L
         const val MOVE_CANCELS_LONG_PRESS_PX = 8.0
         const val INITIAL_VALUE = 25_000_000.0
+
+        /**
+         * Сколько длится возврат к упору после перелёта за 0 или 50 млн.
+         * Фиксированная длительность, а не «пружина до затухания»: расстояние
+         * перелёта зависит от силы броска, а ожидание пользователя — нет.
+         */
+        const val OVERSCROLL_RETURN_MS = 420.0
     }
 
     private val haptics = Haptics(context)
@@ -87,6 +94,14 @@ class AmountPickerView @JvmOverloads constructor(
     private var upp = Sensitivity.BASE_UPP
     private var hapticBucket = Math.round(INITIAL_VALUE / 1_000_000.0)
     private var boundHit = false
+
+    /** Возврат к упору: nanos старта (−1 — не активен), откуда и куда. */
+    private var returnStartNanos = -1L
+    private var returnFrom = 0.0
+    private var returnTo = 0.0
+
+    /** Палец отпущен за упором — возврат стартует на ближайшем кадре. */
+    private var returnPending = false
 
     /** Значение, показанное в прошлом кадре — для решения «перерисовывать ли». */
     private var shown = INITIAL_VALUE
@@ -221,19 +236,30 @@ class AmountPickerView @JvmOverloads constructor(
             raw += delta
             velocity = ValueModel.approach(velocity, delta / dt, 45.0, dt)
         } else {
-            // инерция — масштабируется передачей, поэтому точная установка не уползает
-            if (abs(velocity) > 0.5) {
+            if (returnPending) {
+                returnPending = false
+                beginReturn(nowNanos)
+            }
+            if (returnStartNanos >= 0) {
+                updateReturn(nowNanos)
+            } else if (abs(velocity) > 0.5) {
+                // инерция — масштабируется передачей, поэтому точная установка не уползает
                 raw += velocity * dt
                 velocity *= exp(-dt / 220.0)
+                // Бросок, добивший до упора, не летит дальше «в никуда»:
+                // как только пересекли границу — сразу возврат за фикс. время.
+                if (raw < ValueModel.MIN_VALUE || raw > ValueModel.MAX_VALUE) {
+                    beginReturn(nowNanos)
+                }
             } else {
                 velocity = 0.0
                 val bounded = ValueModel.clamp(raw, ValueModel.MIN_VALUE, ValueModel.MAX_VALUE)
-                raw = if (bounded != raw) {
-                    ValueModel.approach(raw, bounded, 70.0, dt)
+                if (bounded != raw) {
+                    beginReturn(nowNanos)
                 } else {
-                    ValueModel.approach(raw, ValueModel.snap(raw), 80.0, dt)
+                    raw = ValueModel.approach(raw, ValueModel.snap(raw), 80.0, dt)
+                    if (abs(raw - ValueModel.snap(raw)) < 20) raw = ValueModel.snap(raw)
                 }
-                if (abs(raw - ValueModel.snap(raw)) < 20) raw = ValueModel.snap(raw)
             }
         }
         pendingDx = 0.0
@@ -304,6 +330,37 @@ class AmountPickerView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Ставит возврат к ближайшему упору. Длительность фиксирована, старт —
+     * текущая позиция, инерция при этом гасится: перелёт не должен ещё
+     * несколько секунд «догорать» за пределами диапазона.
+     */
+    private fun beginReturn(nowNanos: Long) {
+        val bound = ValueModel.clamp(raw, ValueModel.MIN_VALUE, ValueModel.MAX_VALUE)
+        if (bound == raw) return
+        velocity = 0.0
+        returnFrom = raw
+        returnTo = bound
+        returnStartNanos = nowNanos
+    }
+
+    /** easeOutCubic: резкий старт от упора и мягкая посадка на крайнюю отметку. */
+    private fun updateReturn(nowNanos: Long) {
+        val t = ((nowNanos - returnStartNanos) / 1_000_000.0) / OVERSCROLL_RETURN_MS
+        if (t >= 1.0) {
+            raw = returnTo
+            returnStartNanos = -1L
+            return
+        }
+        val eased = 1.0 - (1.0 - t.coerceAtLeast(0.0)).pow(3)
+        raw = returnFrom + (returnTo - returnFrom) * eased
+    }
+
+    private fun cancelReturn() {
+        returnStartNanos = -1L
+        returnPending = false
+    }
+
     private fun updateHint(dtMs: Double) {
         val target = if (hintShown) 1f else 0f
         if (hintOpacity == target) return
@@ -345,6 +402,7 @@ class AmountPickerView @JvmOverloads constructor(
                 dragging = true
                 velocity = 0.0
                 pendingDx = 0.0
+                cancelReturn()
                 pointerY = y
                 longPressPending = true
                 postDelayed(longPressRunnable, LONG_PRESS_MS)
@@ -385,6 +443,11 @@ class AmountPickerView @JvmOverloads constructor(
         // прокидывает через диапазон, а установка при 1 px = 1 000 замирает
         // ровно там, где палец её оставил.
         velocity *= upp / Sensitivity.BASE_UPP
+        // Палец ушёл за 0 или 50 млн — инерция здесь не нужна, нужен возврат.
+        if (raw < ValueModel.MIN_VALUE || raw > ValueModel.MAX_VALUE) {
+            velocity = 0.0
+            returnPending = true
+        }
         if (precision) {
             precision = false
             progress.target = 0f
