@@ -68,8 +68,13 @@ class AmountPickerView @JvmOverloads constructor(
     private var pulseStart = -1L
     private var indicatorScale = 1f
 
-    /** Подсказка живёт до первого длинного нажатия. */
+    /**
+     * Подсказка видна всегда: она объясняет неочевидный жест, поэтому не
+     * прячется после первого длинного нажатия. Поставьте `false`, если
+     * когда-нибудь понадобится снова скрывать её после обучения.
+     */
     private var hintShown = true
+    private val hintAlwaysVisible = true
     private var hintOpacity = 1f
 
     // ── состояние симуляции ──────────────────────────────────────────────────
@@ -319,7 +324,7 @@ class AmountPickerView @JvmOverloads constructor(
         precision = true
         progress.target = 1f
         haptics.engage()
-        hintShown = false
+        if (!hintAlwaysVisible) hintShown = false
     }
 
     @SuppressLint("ClickableViewAccessibility")
